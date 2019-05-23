@@ -33,6 +33,15 @@
 
 #endif /* PISTACHE_USE_SSL */
 
+#ifdef PISTACHE_SSL_GNUTLS
+#define CHECK(cmd, message) if( cmd < 0 ) throw SocketError( message );
+#define REQUIRED(cmd, message) if( cmd < 0 ) throw ServerError( message );
+#endif /* PISTACHE_SSL_GNUTLS */
+
+
+// Defined in credentials_lookup.cpp
+// TODO: custom callback support
+int credentials_lookup( gnutls_session_t, const char*, gnutls_datum_t*, gnutls_datum_t*, gnutls_datum_t*, gnutls_datum_t* );
 
 namespace Pistache {
 namespace Tcp {
@@ -86,7 +95,7 @@ Listener::Listener()
     , workers_(Const::DefaultWorkers)
     , reactor_()
     , transportKey()
-    , useSSL_(false)
+    , useSSL_(true)
 { }
 
 Listener::Listener(const Address& address)
@@ -99,7 +108,7 @@ Listener::Listener(const Address& address)
     , workers_(Const::DefaultWorkers)
     , reactor_()
     , transportKey()
-    , useSSL_(false)
+    , useSSL_(true)
 {
 }
 
@@ -115,6 +124,14 @@ Listener::~Listener() {
         EVP_cleanup();
     }
 #endif /* PISTACHE_USE_SSL */
+
+#ifdef PISTACHE_SSL_GNUTLS
+    if( this->useSSL_ ){
+        gnutls_srp_free_server_credentials( srp_cred );
+        gnutls_certificate_free_credentials( x509_cred );
+        gnutls_priority_deinit( priority_cache );
+    }
+#endif // PISTACHE_SSL_GNUTLS
 }
 
 void
@@ -363,6 +380,81 @@ void Listener::handleNewConnection()
 {
     struct sockaddr_in peer_addr;
     int client_fd = acceptConnection(peer_addr);
+    auto peer = std::make_shared<Peer>(Address::fromUnix((struct sockaddr *)&peer_addr));
+
+#ifdef PISTACHE_SSL_GNUTLS
+    if( this->useSSL_ ){
+        printf("handleNewConnection using gnutls\n");
+        // Initialise the TLS session
+        CHECK(
+            gnutls_init( &peer->session, GNUTLS_SERVER ),
+            "Unable to initialize TLS session"
+        )
+        printf("gnutls_init\n");
+        // CHECK(
+        //     gnutls_priority_set( session, priority_cache ),
+        //     "Unable to set session priority"
+        // )
+        CHECK(
+            gnutls_priority_set_direct(
+                peer->session,
+                "NORMAL:-KX-ALL:+SRP:+SRP-DSS:+SRP-RSA",
+                NULL
+            ),
+            "Unable to set session priority"
+        )
+        // "NORMAL:-KX-ALL:+SRP:+SRP-DSS:+SRP-RSA",
+        printf("gnutls_priority_set\n");
+        CHECK(
+            gnutls_credentials_set( peer->session, GNUTLS_CRD_CERTIFICATE, &x509_cred ),
+            "Unable to set certificate credentials"
+        )
+        printf("gnutls_credentials_set x509\n");
+        CHECK(
+            gnutls_credentials_set( peer->session, GNUTLS_CRD_SRP, &srp_cred ),
+            "Unable to set SRP credentials"
+        )
+        printf("gnutls_credentials_set srp\n");
+        // TODO: Add support for requesting a certificate from the client
+        // But for now disable it
+        gnutls_certificate_server_set_request( peer->session, GNUTLS_CERT_IGNORE );
+        printf("gnutls_certificate_server_set_request\n");
+        // gnutls_handshake_set_timeout( peer->session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT );
+        printf("gnutls_handshake_set_timeout\n");
+
+        gnutls_transport_set_int( peer->session, client_fd );
+        printf("gnutls_transport_set_int\n");
+
+        printf( "Handshake start\n" );
+        printf("%d",peer->session);
+
+        int ret;
+        do {
+            printf("%d",peer->session);
+            ret = gnutls_handshake( peer->session );
+        } while( ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED );
+        if( ret < 0 ){
+            printf( "fuck %d\n", ret );
+            close( client_fd );
+            gnutls_deinit( peer->session );
+            peer->session = NULL;
+            throw SocketError(
+                "Handshake has failed."
+            );
+        }
+
+        // TODO: Drop this logging. Only used for debugging the SRP connection
+        // establishment
+        printf( "Handshake completed\n" );
+        printf(
+            "    User connected: %s\n",
+            gnutls_srp_server_get_username( peer->session )
+        );
+
+        peer->associateSSL( &peer->session );
+    }
+#endif // PISTACHE_SSL_GNUTLS
+    printf("ssl = %d\n", useSSL_ );
 
 #ifdef PISTACHE_USE_SSL
     SSL *ssl = nullptr;
@@ -386,8 +478,6 @@ void Listener::handleNewConnection()
 #endif /* PISTACHE_USE_SSL */
 
     make_non_blocking(client_fd);
-
-    auto peer = std::make_shared<Peer>(Address::fromUnix((struct sockaddr *)&peer_addr));
     peer->associateFd(client_fd);
 
 #ifdef PISTACHE_USE_SSL
@@ -496,18 +586,54 @@ Listener::setupSSLAuth(const std::string &ca_file, const std::string &ca_path, i
 #endif /* OPENSSL_VERSION_NUMBER */
     );
 }
+#endif // PISTACHE_USE_SSL
 
 void
 Listener::setupSSL(const std::string &cert_path, const std::string &key_path, bool use_compression)
 {
+    this->useSSL_ = true;
+#ifdef PISTACHE_USE_SSL
     SSL_load_error_strings();
+    ERR_load_crypto_strings();
     OpenSSL_add_ssl_algorithms();
 
     this->ssl_ctx_ = ssl_create_context(cert_path, key_path, use_compression);
-    this->useSSL_ = true;
-}
+#endif // PISTACHE_USE_SSL
+#ifdef PISTACHE_SSL_GNUTLS
+    printf("Listener ssl on\n" );
+    printf("ssl = %d\n", useSSL_ );
+    printf("ssl = %d\n", this->useSSL_ );
+    // Verify an apropriate GnuTLS version is available with SRP support
+    if( gnutls_check_version( "3.6.0" ) == NULL )
+        throw std::runtime_error( "GnuTLS 3.6.0 or later is required." );
 
-#endif /* PISTACHE_USE_SSL */
+    // Set SRP credentials
+    gnutls_srp_allocate_server_credentials( &srp_cred );
+    gnutls_srp_set_server_credentials_file( srp_cred, "tpasswd", "tpasswd.conf" );
+    gnutls_srp_set_server_credentials_function( srp_cred, credentials_lookup );
+
+    // Set the certificate key pair
+    gnutls_certificate_allocate_credentials( &x509_cred );
+    // gnutls_certificate_set_x509_trust_file( x509_cred, CAFILE, GNUTLS_X509_FMT_PEM );
+    REQUIRED(
+        gnutls_certificate_set_x509_key_file( x509_cred, cert_path.c_str(), key_path.c_str(), GNUTLS_X509_FMT_PEM ),
+        "Unable to load SSL certificate/keypair!"
+    )
+
+    // Initialise the Priority Cache
+    // TODO: Allow setting custom priorities for a universal SSL implementation
+    REQUIRED(
+        gnutls_priority_init( &priority_cache, NULL, NULL ),
+        "Unable to initialize priority cache!"
+    )
+    // gnutls_priority_set_direct(
+    //     session,
+    //     "NORMAL",
+    //     NULL
+    // );
+    // "NORMAL:-KX-ALL:+SRP:+SRP-DSS:+SRP-RSA",
+#endif // PISTACHE_SSL_GNUTLS
+}
 
 } // namespace Tcp
 } // namespace Pistache

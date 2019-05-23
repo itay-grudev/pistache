@@ -12,7 +12,11 @@
 #include <pistache/peer.h>
 #include <pistache/tcp.h>
 #include <pistache/os.h>
+#include <pistache/errors.h>
 
+#ifdef PISTACHE_USE_SSL
+#include <openssl/err.h>
+#endif /* PISTACHE_USE_SSL */
 
 namespace Pistache {
 
@@ -125,47 +129,62 @@ Transport::disarmTimer(Fd fd) {
 void
 Transport::handleIncoming(const std::shared_ptr<Peer>& peer) {
     char buffer[Const::MaxBuffer] = {0};
-
-    ssize_t totalBytes = 0;
     int fd = peer->fd();
 
     for (;;) {
 
         ssize_t bytes;
 
-#ifdef PISTACHE_USE_SSL
         if (peer->ssl() != NULL) {
-            bytes = SSL_read((SSL *)peer->ssl(), buffer + totalBytes,
-                Const::MaxBuffer - totalBytes);
-        } else {
-#endif /* PISTACHE_USE_SSL */
-            bytes = recv(fd, buffer + totalBytes, Const::MaxBuffer - totalBytes, 0);
 #ifdef PISTACHE_USE_SSL
+            bytes = SSL_read( (SSL*)peer->ssl(), buffer, Const::MaxBuffer );
+#endif // PISTACHE_USE_SSL
+#ifdef PISTACHE_SSL_GNUTLS
+            bytes = gnutls_record_recv( *(gnutls_session_t*)peer->ssl(), buffer, Const::MaxBuffer );
+#endif // PISTACHE_SSL_GNUTLS
+        } else {
+            bytes = recv( fd, buffer, Const::MaxBuffer, 0 );
         }
-#endif /* PISTACHE_USE_SSL */
 
-        if (bytes == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (totalBytes > 0) {
-                    handler_->onInput(buffer, totalBytes, peer);
+        if( bytes == 0 ){ // EOF / disconnect
+            handlePeerDisconnection( peer );
+            break;
+        } else if( bytes < 0 ) { // Error
+            if (peer->ssl() != NULL) {
+#ifdef PISTACHE_SSL_GNUTLS
+                // Check if the error is non-fatal
+                if( gnutls_error_is_fatal( bytes ) == 0 ){
+                    continue;
+                } else {
+                    // Fatal GnuTLS error that requres the session to be terminated
+                    throw SocketError( gnutls_strerror( bytes ) );
                 }
-            } else {
-                if (errno == ECONNRESET) {
-                    handlePeerDisconnection(peer);
-                }
+#endif // PISTACHE_SSL_GNUTLS
+#ifdef PISTACHE_USE_SSL
+                int ssl_error = SSL_get_error( (SSL*)peer->ssl(), bytes );
+                if( // Recoverable error. Should be called again
+                    ssl_error == SSL_ERROR_WANT_READ ||
+                    ssl_error == SSL_ERROR_WANT_WRITE ||
+                    ssl_error == SSL_ERROR_WANT_CONNECT ||
+                    ssl_error == SSL_ERROR_WANT_ACCEPT
+                ) continue;
                 else {
-                    throw std::runtime_error(strerror(errno));
+                    throw SocketError( ERR_error_string( ERR_get_error(), NULL ) );
                 }
+#endif // PISTACHE_USE_SSL
             }
+#if !defined PISTACHE_USE_SSL && !defined PISTACHE_SSL_GNUTLS
+            if( errno == EAGAIN || errno == EWOULDBLOCK ){
+                break;
+            } else if( errno == ECONNRESET ){
+                handlePeerDisconnection( peer );
+            } else {
+                throw std::runtime_error( strerror( errno ));
+            }
+#endif // !defined PISTACHE_USE_SSL && !defined PISTACHE_SSL_GNUTLS
             break;
-        }
-        else if (bytes == 0) {
-            handlePeerDisconnection(peer);
-            break;
-        }
-
-        else {
-            handler_->onInput(buffer, bytes, peer);
+        } else { // Bytes received
+            handler_->onInput( buffer, bytes, peer );
         }
     }
 }
@@ -185,6 +204,12 @@ Transport::handlePeerDisconnection(const std::shared_ptr<Peer>& peer) {
         peer->associateSSL(NULL);
     }
 #endif /* PISTACHE_USE_SSL */
+#ifdef PISTACHE_SSL_GNUTLS
+    if( peer->session ){
+        gnutls_deinit( peer->session );
+        peer->session = NULL;
+    }
+#endif // PISTACHE_SSL_GNUTLS
 
     peers.erase(it->first);
 
@@ -240,20 +265,35 @@ Transport::asyncWriteImpl(Fd fd)
                 auto raw = buffer.raw();
                 auto ptr = raw.data().c_str() + totalWritten;
 
-#ifdef PISTACHE_USE_SSL
+#if defined PISTACHE_USE_SSL || defined PISTACHE_SSL_GNUTLS
                 auto it = peers.find(fd);
 
                 if (it == std::end(peers))
                     throw std::runtime_error("No peer found for fd: " + std::to_string(fd));
 
+#endif // defined PISTACHE_USE_SSL || defined PISTACHE_SSL_GNUTLS
+#ifdef PISTACHE_USE_SSL
                 if (it->second->ssl() != NULL) {
                     bytesWritten = SSL_write((SSL *)it->second->ssl(), ptr, len);
-                } else {
-#endif /* PISTACHE_USE_SSL */
-                    bytesWritten = ::send(fd, ptr, len, flags);
-#ifdef PISTACHE_USE_SSL
                 }
 #endif /* PISTACHE_USE_SSL */
+#ifdef PISTACHE_SSL_GNUTLS
+                if( it->second->session ){
+                    int ret;
+                    do {
+                        ret = gnutls_record_send( it->second->session, ptr, len );
+                    } while( ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN );
+                    if( ret < 0 ){
+                        // Fatal GnuTLS error that requres the session to be terminated
+                        if( gnutls_error_is_fatal( ret ) != 0 ){
+                            throw std::runtime_error( gnutls_strerror( ret ) );
+                        }
+                    }
+                }
+#endif // PISTACHE_SSL_GNUTLS
+#if !defined PISTACHE_USE_SSL && !defined PISTACHE_SSL_GNUTLS
+                bytesWritten = ::send(fd, ptr, len, flags);
+#endif // !defined PISTACHE_USE_SSL && !defined PISTACHE_SSL_GNUTLS
             } else {
                 auto file = buffer.fd();
                 off_t offset = totalWritten;

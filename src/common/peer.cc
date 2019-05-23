@@ -19,6 +19,9 @@ Peer::Peer()
     : transport_(nullptr)
     , fd_(-1)
     , ssl_(NULL)
+#ifdef PISTACHE_SSL_GNUTLS
+    , session(NULL)
+#endif // PISTACHE_SSL_GNUTLS
 { }
 
 Peer::Peer(const Address& addr)
@@ -26,6 +29,7 @@ Peer::Peer(const Address& addr)
     , addr(addr)
     , fd_(-1)
     , ssl_(NULL)
+    , session(NULL)
 { }
 
 Peer::~Peer()
@@ -34,6 +38,12 @@ Peer::~Peer()
     if (ssl_)
         SSL_free((SSL *)ssl_);
 #endif /* PISTACHE_USE_SSL */
+#ifdef PISTACHE_SSL_GNUTLS
+    if( session ){
+        gnutls_deinit( session );
+        session = NULL;
+    }
+#endif // PISTACHE_SSL_GNUTLS
 }
 
 const Address& Peer::address() const
@@ -51,7 +61,6 @@ Peer::associateFd(int fd) {
     fd_ = fd;
 }
 
-#ifdef PISTACHE_USE_SSL
 void
 Peer::associateSSL(void *ssl)
 {
@@ -62,7 +71,6 @@ void *
 Peer::ssl(void) const {
     return ssl_;
 }
-#endif /* PISTACHE_USE_SSL */
 
 int
 Peer::fd() const {

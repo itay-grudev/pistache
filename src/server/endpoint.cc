@@ -92,14 +92,11 @@ Endpoint::shutdown()
 void
 Endpoint::useSSL(std::string cert, std::string key, bool use_compression)
 {
-#ifndef PISTACHE_USE_SSL
-    (void)cert;
-    (void)key;
-    (void)use_compression;
-    throw std::runtime_error("Pistache is not compiled with SSL support.");
+#if defined PISTACHE_USE_SSL || defined PISTACHE_SSL_GNUTLS
+    listener.setupSSL( cert.c_str(), key.c_str(), use_compression );
 #else
-    listener.setupSSL(cert, key, use_compression);
-#endif /* PISTACHE_USE_SSL */
+    throw std::runtime_error("Pistache is not compiled with SSL support.");
+#endif // defined PISTACHE_USE_SSL || defined PISTACHE_SSL_GNUTLS
 }
 
 void
@@ -109,11 +106,10 @@ Endpoint::useSSLAuth(std::string ca_file, std::string ca_path, int (*cb)(int, vo
     (void)ca_file;
     (void)ca_path;
     (void)cb;
-    throw std::runtime_error("Pistache is not compiled with SSL support.");
+    throw std::runtime_error("Pistache is not compiled with OpenSSL support.");
 #else
     listener.setupSSLAuth(ca_file, ca_path, cb);
 #endif /* PISTACHE_USE_SSL */
-
 }
 
 Async::Promise<Tcp::Listener::Load>

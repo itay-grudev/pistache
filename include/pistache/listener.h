@@ -1,6 +1,6 @@
 /* listener.h
    Mathieu Stefani, 12 August 2015
-   
+
   A TCP Listener
 */
 
@@ -24,6 +24,10 @@
 #ifdef PISTACHE_USE_SSL
 #include <openssl/ssl.h>
 #endif /* PISTACHE_USE_SSL */
+
+#ifdef PISTACHE_SSL_GNUTLS
+#include <gnutls/gnutls.h>
+#endif // PISTACHE_SSL_GNUTLS
 
 namespace Pistache {
 namespace Tcp {
@@ -76,7 +80,7 @@ public:
     void setupSSL(const std::string &cert_path, const std::string &key_path, bool use_compression);
     void setupSSLAuth(const std::string &ca_file, const std::string &ca_path, int (*cb)(int, void *));
 
-private: 
+private:
     Address addr_;
     int listen_fd;
     int backlog_;
@@ -91,6 +95,12 @@ private:
 
     Aio::Reactor reactor_;
     Aio::Reactor::Key transportKey;
+
+#ifdef PISTACHE_SSL_GNUTLS
+    gnutls_priority_t priority_cache;
+    gnutls_srp_server_credentials_t srp_cred;
+    gnutls_certificate_credentials_t x509_cred;
+#endif // PISTACHE_SSL_GNUTLS
 
     void handleNewConnection();
     int acceptConnection(struct sockaddr_in& peer_addr) const;

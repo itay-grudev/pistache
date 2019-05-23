@@ -23,8 +23,10 @@
 
 #endif /* PISTACHE_USE_SSL */
 
-
-
+#ifdef PISTACHE_SSL_GNUTLS
+#include <gnutls/gnutls.h>
+#include <pistache/listener.h>
+#endif // PISTACHE_SSL_GNUTLS
 
 namespace Pistache {
     namespace Http { namespace Private { class ParserBase; } }
@@ -39,7 +41,7 @@ public:
     Peer();
     Peer(const Address& addr);
     ~Peer();
-    
+
     const Address& address() const;
     const std::string& hostname() const;
 
@@ -67,6 +69,12 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Pistache::Http::Private::ParserBase>> data_;
 
     void *ssl_;
+
+#ifdef PISTACHE_SSL_GNUTLS
+    gnutls_session_t session;
+    friend class Pistache::Tcp::Listener;
+    friend class Pistache::Tcp::Transport;
+#endif // PISTACHE_SSL_GNUTLS
 };
 
 std::ostream& operator<<(std::ostream& os, const Peer& peer);

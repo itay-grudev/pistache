@@ -19,7 +19,14 @@ option(PISTACHE_ENABLE_NETWORK_TESTS "if tests are built, run ones needing netwo
 option(PISTACHE_BUILD_EXAMPLES "build examples alongside the project" OFF)
 option(PISTACHE_BUILD_DOCS "build docs alongside the project" OFF)
 option(PISTACHE_INSTALL "add pistache as install target (recommended)" ON)
-option(PISTACHE_USE_SSL "add support for SSL server" OFF)
+option(PISTACHE_USE_SSL "add server support for SSL via OpenSSL" OFF)
+option(PISTACHE_SSL_GNUTLS "add server support for SSL via GnuTLS" OFF)
+
+if (PISTACHE_USE_SSL)
+    if (PISTACHE_SSL_GNUTLS)
+        message( FATAL_ERROR "Both OpenSSL and GnuTLS options specified!" )
+    endif()
+endif()
 
 find_program(CTEST_MEMORYCHECK_COMMAND NAMES valgrind)
 find_program(CTEST_COVERAGE_COMMAND NAMES gcov)
@@ -28,7 +35,7 @@ find_program(CMAKE_CXX_CPPCHECK NAMES cppcheck)
 if (CMAKE_CXX_CPPCHECK)
     message("-- Cppcheck found " ${CMAKE_CXX_CPPCHECK})
     list(
-        APPEND CMAKE_CXX_CPPCHECK 
+        APPEND CMAKE_CXX_CPPCHECK
             "--enable=all"
             "--suppress=*:${PROJECT_SOURCE_DIR}/third-party*"
             "--suppress=*:${PROJECT_SOURCE_DIR}/tests*"
@@ -78,6 +85,11 @@ if (PISTACHE_USE_SSL)
     link_libraries(-lssl -lcrypto)
 endif (PISTACHE_USE_SSL)
 
+if(PISTACHE_SSL_GNUTLS)
+    add_definitions(-DPISTACHE_SSL_GNUTLS)
+    link_libraries(-lgnutls)
+endif(PISTACHE_SSL_GNUTLS)
+
 include_directories (${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Set version...
@@ -113,6 +125,10 @@ include_directories (${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(PISTACHE_USE_SSL)
         set(LIBS "${LIBS} -lssl -lcrypto")
     endif(PISTACHE_USE_SSL)
+
+    if(PISTACHE_SSL_GNUTLS)
+        set(LIBS "${LIBS} -lgnutls")
+    endif(PISTACHE_SSL_GNUTLS)
 
 # Configure the pkg-config metadata...
 
@@ -209,4 +225,3 @@ endif()
     #  dist target to the generated makefile...
     include(CPack)
     add_custom_target(dist COMMAND ${CMAKE_MAKE_PROGRAM} package_source)
-
